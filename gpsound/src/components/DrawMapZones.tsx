@@ -50,6 +50,7 @@ const DrawMapZones = () => {
     const [isMarkerDlgOpen, setIsMarkerDlgOpen] = useState(false);
     const [showDebugInstruments, setShowDebugInstruments] = useState(false);
     const [debugMode, setDebugMode] = useState(false);
+    const [playingInstruments, setPlayingInstruments] = useState<Set<string>>(new Set());
     let {point} = Flatten;
     const chosenMarkerRef = useRef<Flatten.Point>(point(0,0));
     
@@ -644,11 +645,24 @@ const DrawMapZones = () => {
         setShowDebugInstruments(!showDebugInstruments);
     }
 
-    const handlePlayDebugInstrument = (instrumentId: string) => {
+    const handleToggleDebugInstrument = async (instrumentId: string) => {
         const soundPlayer = SoundPlayer.getInstance();
-        console.log(`Playing debug instrument: ${instrumentId}`);
-        soundPlayer.playSingle(instrumentId, "C4");
-        setShowDebugInstruments(false); // Close the selector after selection
+
+        if (playingInstruments.has(instrumentId)) {
+            // Stop the instrument
+            console.log(`Stopping debug instrument: ${instrumentId}`);
+            soundPlayer.stopInstrument(instrumentId);
+            setPlayingInstruments(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(instrumentId);
+                return newSet;
+            });
+        } else {
+            // Start the instrument
+            console.log(`Starting debug instrument: ${instrumentId}`);
+            await soundPlayer.startInstrument(instrumentId, "C4");
+            setPlayingInstruments(prev => new Set(prev).add(instrumentId));
+        }
     }
 
     const handleCloseDebugSelector = () => {
@@ -821,27 +835,53 @@ const DrawMapZones = () => {
                             minWidth: '200px'
                         }}
                     >
-                        <div style={{ padding: '8px', borderBottom: '1px solid #e5e5e5', fontWeight: 'bold' }}>
-                            Select Instrument
+                        <div style={{ padding: '8px', borderBottom: '1px solid #e5e5e5', fontWeight: 'bold', color: '#111' }}>
+                            Select instruments
                         </div>
-                        {INSTRUMENT_DEFINITIONS.map((instrument) => (
-                            <div
-                                key={instrument.id}
-                                onClick={() => handlePlayDebugInstrument(instrument.id)}
-                                style={{
-                                    padding: '8px 12px',
-                                    cursor: 'pointer',
-                                    borderBottom: '1px solid #f0f0f0',
-                                    transition: 'background-color 0.2s',
-                                    backgroundColor: 'white'
-                                }}
-                                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f0f0f0')}
-                                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'white')}
-                            >
-                                <div style={{ fontWeight: '500', color: '#111' }}>{instrument.name}</div>
-                                <div style={{ fontSize: '12px', color: '#1f34b8ff' }}>ID: {instrument.id}</div>
-                            </div>
-                        ))}
+                        {INSTRUMENT_DEFINITIONS.map((instrument) => {
+                            const isPlaying = playingInstruments.has(instrument.id);
+                            return (
+                                <div
+                                    key={instrument.id}
+                                    style={{
+                                        padding: '8px 12px',
+                                        borderBottom: '1px solid #f0f0f0',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: '12px'
+                                    }}
+                                >
+                                    <div style={{ flex: 1 }}>
+                                        <div style={{ fontWeight: '500', color: '#111' }}>{instrument.name}</div>
+                                        <div style={{ fontSize: '12px', color: '#1f34b8ff' }}>ID: {instrument.id}</div>
+                                    </div>
+                                    <button
+                                        onClick={() => handleToggleDebugInstrument(instrument.id)}
+                                        style={{
+                                            padding: '6px 12px',
+                                            border: 'none',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            backgroundColor: isPlaying ? '#ef4444' : '#10b981',
+                                            color: 'white',
+                                            transition: 'all 0.2s',
+                                            minWidth: '60px'
+                                        }}
+                                        onMouseEnter={(e) => {
+                                            e.currentTarget.style.backgroundColor = isPlaying ? '#dc2626' : '#059669';
+                                        }}
+                                        onMouseLeave={(e) => {
+                                            e.currentTarget.style.backgroundColor = isPlaying ? '#ef4444' : '#10b981';
+                                        }}
+                                    >
+                                        {isPlaying ? '⏹ Stop' : '▶ Play'}
+                                    </button>
+                                </div>
+                            );
+                        })}
                     </div>
                 </>
             )}

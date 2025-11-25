@@ -9,6 +9,7 @@ type InstrumentGroup = Instrument | Instrument[];
 export class SoundPlayer {
   private static instance: SoundPlayer;
   private activeInstruments: InstrumentGroup[] = [];
+  private instrumentMap: Map<string, InstrumentGroup> = new Map();
 
   static getInstance(): SoundPlayer {
     if (!SoundPlayer.instance) {
@@ -54,12 +55,44 @@ export class SoundPlayer {
     });
   }
 
+  async startInstrument(instrumentId: string, note: string = "C4"): Promise<void> {
+    // If already playing, don't start again
+    if (this.instrumentMap.has(instrumentId)) {
+      return;
+    }
+
+    await Tone.start();
+    const instrument = this.createInstrument(instrumentId);
+    this.instrumentMap.set(instrumentId, instrument);
+    this.activeInstruments.push(instrument);
+    this.triggerInstrument(instrument, note);
+  }
+
+  stopInstrument(instrumentId: string): void {
+    const instrument = this.instrumentMap.get(instrumentId);
+    if (instrument) {
+      this.destroyInstrument(instrument);
+      this.instrumentMap.delete(instrumentId);
+
+      // Remove from active instruments
+      const index = this.activeInstruments.indexOf(instrument);
+      if (index > -1) {
+        this.activeInstruments.splice(index, 1);
+      }
+    }
+  }
+
+  isInstrumentPlaying(instrumentId: string): boolean {
+    return this.instrumentMap.has(instrumentId);
+  }
+
   stopAll(): void {
     // Stop all tracked instruments
     this.activeInstruments.forEach(instrument => {
       this.destroyInstrument(instrument);
     });
     this.activeInstruments = [];
+    this.instrumentMap.clear();
 
     // NUCLEAR OPTION: Stop Transport and silence everything
     Tone.getTransport().stop();
