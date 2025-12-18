@@ -653,6 +653,7 @@ const DrawMapZones = ({
     };
 
     // Export arrangement (shapes and map view) to JSON file
+    // Exports from Automerge (syncedShapes) for consistency
     const exportArrangement = () => {
         let mapView = null;
         if (mapInstanceRef.current) {
@@ -663,10 +664,17 @@ const DrawMapZones = ({
                 zoom
             };
         }
+        
+        // Export from synced shapes (Automerge) instead of local metadata
+        const shapes = syncedShapesRef.current.map(shape => ({
+            id: shape.id,
+            type: shape.type,
+            coordinates: shape.coordinates,
+            soundType: shape.soundType
+        }));
+        
         const exportData = {
-            shapes: Array.from(shapeMetadataRef.current.values())
-                .concat(Array.from(markerMetadataRef.current.values())
-            ),
+            shapes,
             mapView
         };
         const dataStr = JSON.stringify(exportData, null, 2);
@@ -880,6 +888,7 @@ const DrawMapZones = ({
     }
 
     // Import arrangement (shapes and map view) from JSON file
+    // This syncs to Automerge so all users see the imported shapes
     const importArrangement = (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
         if (!file) return;
@@ -888,27 +897,18 @@ const DrawMapZones = ({
             try {
                 const importedData = JSON.parse(e.target?.result as string);
                 if (importedData && Array.isArray(importedData.shapes)) {
-                    const shapeMeta = drawShapesOnMap(importedData.shapes);
-                    const markerObjs: any[] = []
-                    const shapeObjs: any[] = []
-                    // const shapeMarkerMeta: DrawnLayer[] = []
-                    shapeMeta.forEach( (shape: DrawnLayer) => {
-                        const shapeObj = flattenShape(shape.type, shape.coordinates);
-                        if (shape.type == 'marker') {
-                            if (shapeObj instanceof Flatten.Point) {
-                                markerObjs.push(shapeObj);
-                                addUpdateMarkerMeta(shapeObj, shape);
-                            }
-                        } else {
-                            if (shapeObj instanceof Flatten.Circle || shapeObj instanceof Flatten.Polygon) {
-                                shapeObjs.push(shapeObj);
-                                addUpdateShapeMeta(shapeObj, shape);
-                            }
-                        }
-                    })
-
-                    setDrawnShapes(shapeObjs);
-                    setDrawnMarkers(markerObjs);
+                    // First, clear existing shapes (both local and in Automerge)
+                    clearArrangement();
+                    
+                    // Add each shape to Automerge - the sync effect will draw them
+                    importedData.shapes.forEach((shape: DrawnLayer) => {
+                        // Skip markers - we use user markers instead
+                        if (shape.type === 'marker') return;
+                        
+                        // Add to Automerge with the sound type
+                        addShapeRef.current(shape.type, shape.coordinates, shape.soundType);
+                    });
+                    
                     // Restore map view if present
                     if (importedData.mapView && mapInstanceRef.current) {
                         const { center, zoom } = importedData.mapView;
@@ -922,12 +922,17 @@ const DrawMapZones = ({
                             mapInstanceRef.current.setView([center[0], center[1]], zoom);
                         }
                     }
+                    
+                    console.log('Imported', importedData.shapes.length, 'shapes to Automerge');
                 } else if (Array.isArray(importedData)) {
-                    // Fallback for old format
-                    // TO REMOVE
-                    console.log("old format")
-                    setDrawnShapes(importedData);
-                    drawShapesOnMap(importedData);
+                    // Fallback for old format - just add shapes without sound
+                    console.log("Importing old format (no sound data)");
+                    clearArrangement();
+                    importedData.forEach((shape: any) => {
+                        if (shape.type && shape.coordinates) {
+                            addShapeRef.current(shape.type, shape.coordinates, null);
+                        }
+                    });
                 }
             } catch (err) {
                 console.log(err)
@@ -935,6 +940,9 @@ const DrawMapZones = ({
             }
         };
         reader.readAsText(file);
+        
+        // Reset the input so the same file can be imported again
+        event.target.value = '';
     };
 
     // update soundType assigned to shape
