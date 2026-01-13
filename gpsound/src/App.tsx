@@ -19,6 +19,9 @@ function App() {
     updateShapeCoordinates,
     deleteShape,
     clearAllShapes,
+    updateTransportState,
+    initializeTransportIfNeeded,
+    doc,
     isReady
   } = useAutomergeDoc();
   const [isExpanded, setIsExpanded] = useState(false);
@@ -227,6 +230,9 @@ function App() {
         updateShapeCoordinates={updateShapeCoordinates}
         deleteShape={deleteShape}
         clearAllShapes={clearAllShapes}
+        updateTransportState={updateTransportState}
+        initializeTransportIfNeeded={initializeTransportIfNeeded}
+        transportState={doc?.transport}
       />
     </>
   );

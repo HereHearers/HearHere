@@ -4,12 +4,15 @@ import 'leaflet-draw';
 import Flatten from 'flatten-js';
 import SoundKit from './SoundKit';
 import SoundPlayer from './SoundPlayer';
+import { INSTRUMENT_DEFINITIONS } from './instrumentConfig';
 import type { DrawnLayer, DrawnShape, SoundConfig } from '../sharedTypes';
-import type { User, SyncedShape } from '../automergeTypes';
+import type { User, SyncedShape, TransportState } from '../automergeTypes';
 
 // Fix for default markers
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
+
+// TODO: remove vestigial marker logic
 
 let DefaultIcon = L.icon({
     iconUrl: icon,
@@ -41,6 +44,9 @@ interface DrawMapZonesProps {
     updateShapeCoordinates: (shapeId: string, coordinates: any) => void;
     deleteShape: (shapeId: string) => void;
     clearAllShapes: () => void;
+    updateTransportState: (transportState: TransportState) => void;
+    initializeTransportIfNeeded: () => boolean;
+    transportState?: TransportState;
 }
 
 const DrawMapZones = ({ 
@@ -53,6 +59,9 @@ const DrawMapZones = ({
     updateShapeCoordinates,
     deleteShape,
     clearAllShapes,
+    updateTransportState,
+    initializeTransportIfNeeded,
+    transportState
 }: DrawMapZonesProps) => {
     const mapRef = useRef<HTMLDivElement>(null);
     const mapInstanceRef = useRef<L.Map | null>(null);
@@ -68,6 +77,9 @@ const DrawMapZones = ({
         shapeId: null,
         soundType: null
     });
+    const [showDebugInstruments, setShowDebugInstruments] = useState(false);
+    const [debugMode, setDebugMode] = useState(false);
+    const [playingInstruments, setPlayingInstruments] = useState<Set<string>>(new Set());
     let {point} = Flatten;
     
     // Track user markers (userId -> L.Marker)
@@ -97,6 +109,15 @@ const DrawMapZones = ({
         deleteShapeRef.current = deleteShape;
         syncedShapesRef.current = syncedShapes;
     }, [addShape, deleteShape, syncedShapes]);
+
+    // Track if this user is the transport master
+    const [isTransportMaster, setIsTransportMaster] = useState(false);
+    // Track current BPM for UI
+    const [currentBPM, setCurrentBPM] = useState(120);
+    // Track if transport controls are visible
+    const [showTransportControls, setShowTransportControls] = useState(false);
+    // Track if zone management menu is visible
+    const [showZoneManagement, setShowZoneManagement] = useState(false);
     
     // handling state updates for shapes and markers
     const addUpdateShapeMeta = (k: DrawnShape, v: DrawnLayer) => {
@@ -527,6 +548,58 @@ const DrawMapZones = ({
         }
     }, [syncedShapes]);
 
+    // Initialize transport when audio is first enabled
+    useEffect(() => {
+        if (!isAudioEnabled) return;
+
+        const soundPlayer = SoundPlayer.getInstance();
+        const becameMaster = initializeTransportIfNeeded();
+
+        if (becameMaster) {
+            // This user is the first to enable audio, so they become the transport master
+            console.log('Became transport master - initializing transport');
+            setIsTransportMaster(true);
+            soundPlayer.initializeTransport(120);
+
+            // Broadcast initial transport state
+            const initialState = soundPlayer.getTransportState(currentUserId);
+            updateTransportState(initialState);
+            setCurrentBPM(initialState.bpm);
+        } else {
+            // Sync to existing transport state
+            console.log('Syncing to existing transport');
+            setIsTransportMaster(false);
+            if (transportState) {
+                soundPlayer.syncTransportState(transportState);
+                setCurrentBPM(transportState.bpm);
+            }
+        }
+    }, [isAudioEnabled, currentUserId, initializeTransportIfNeeded, updateTransportState]);
+
+    // Sync transport state when it changes from other users
+    useEffect(() => {
+        if (!isAudioEnabled || !transportState) return;
+
+        // Don't sync if this user is the master (to avoid feedback loops)
+        if (transportState.masterId === currentUserId) return;
+
+        const soundPlayer = SoundPlayer.getInstance();
+        soundPlayer.syncTransportState(transportState);
+        setCurrentBPM(transportState.bpm);
+    }, [transportState, isAudioEnabled, currentUserId]);
+
+    // Helper function to get current user's position as a Flatten.Point
+    const getUserPoint = () => {
+        const currentUser = connectedUsers.find(u => u.id === currentUserId);
+        if (!currentUser?.position) return null;
+
+        const { lat, lng } = currentUser.position;
+        const refLat = mapLoc[0];
+        const refLng = mapLoc[1];
+        const userCoords = GPStoMeters(lat, lng, refLat, refLng);
+        return point(userCoords.x, userCoords.y);
+    };
+
     // Extract current user's position as a string to avoid re-triggering on object reference changes
     const currentUserPositionKey = (() => {
         const currentUser = connectedUsers.find(u => u.id === currentUserId);
@@ -540,14 +613,8 @@ const DrawMapZones = ({
         if (drawnShapes.length === 0) return;
         if (!currentUserPositionKey) return;
 
-        // Parse position from key
-        const [lat, lng] = currentUserPositionKey.split(',').map(Number);
-
-        // Convert lat/lng to meters using the same coordinate system as shapes
-        const refLat = mapLoc[0];
-        const refLng = mapLoc[1];
-        const userCoords = GPStoMeters(lat, lng, refLat, refLng);
-        const userPoint = point(userCoords.x, userCoords.y);
+        const userPoint = getUserPoint();
+        if (!userPoint) return;
 
         // Check collisions
         let planarSet = new Flatten.PlanarSet();
@@ -848,25 +915,32 @@ const DrawMapZones = ({
         // TODO:
         // modulate sound as user nears zone within distance threshold (meters) - eg ramp sound
         // potentially calculated when user position changes by x amount
-        chosenMarker, 
+        // chosenMarker, 
         threshold} : {
-            chosenMarker: Flatten.Point,
             threshold?: number}) => {
+
         // get array of shapes that do not include marker sorted by distance to marker
-        if (!chosenMarker) {
-            console.log("no marker selected")
-            return
-        }
+        // if (!chosenMarker) {
+        //     console.log("no marker selected")
+        //     return
+        // }
         if (drawnShapes.length === 0) {
             console.log("No shapes to check collisions");
             return [];
         }
-        const collidedShapes = getCollisions(chosenMarker);
+
+        const userPoint = getUserPoint();
+        if (!userPoint) {
+            console.log("No user position available");
+            return [];
+        }
+
+        const collidedShapes = getCollisions(userPoint);
         const outsideShapes = drawnShapes.filter(x => !collidedShapes?.includes(x))
         const shapeProximity: any[] = []
         outsideShapes.forEach( (shape) => {
             // distance calculated as meters
-            const dist = chosenMarker.distanceTo(shape)[0]
+            const dist = userPoint.distanceTo(shape)[0]
             // if threshold defined return shapes within distance threshold
             if (threshold == null) {
                 shapeProximity.push({
@@ -980,23 +1054,75 @@ const DrawMapZones = ({
     }
 
     const handleSoundboxing = () => {
-        const soundPlayer = SoundPlayer.getInstance();
-        console.log("playing test sound")
-        soundPlayer.playSingle("test", "C4")
+        // Toggle the debug instrument selector
+        setShowDebugInstruments(!showDebugInstruments);
     }
+
+    const handleToggleTryInstrument = async (instrumentId: string) => {
+        const soundPlayer = SoundPlayer.getInstance();
+
+        if (playingInstruments.has(instrumentId)) {
+            // Stop the instrument
+            console.log(`Stopping debug instrument: ${instrumentId}`);
+            soundPlayer.stopInstrument(instrumentId);
+            setPlayingInstruments(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(instrumentId);
+                return newSet;
+            });
+        } else {
+            // Start the instrument
+            console.log(`Starting debug instrument: ${instrumentId}`);
+            await soundPlayer.startInstrument(instrumentId, "C4");
+            setPlayingInstruments(prev => new Set(prev).add(instrumentId));
+        }
+    }
+
+    const handleCloseDebugSelector = () => {
+        setShowDebugInstruments(false);
+    }
+
+    const handleCloseTransportControls = () => {
+        setShowTransportControls(false);
+    }
+
+    const handleCloseZoneManagement = () => {
+        setShowZoneManagement(false);
+    }
+
+    // Transport control handlers
+    const handleTransportStart = () => {
+        const soundPlayer = SoundPlayer.getInstance();
+        const newState = soundPlayer.startTransport(currentUserId);
+        updateTransportState(newState);
+    };
+
+    const handleTransportStop = () => {
+        const soundPlayer = SoundPlayer.getInstance();
+        const newState = soundPlayer.stopTransport(currentUserId);
+        updateTransportState(newState);
+    };
+
+    const handleBPMChange = (newBPM: number) => {
+        const soundPlayer = SoundPlayer.getInstance();
+        const newState = soundPlayer.setBPM(newBPM, currentUserId);
+        updateTransportState(newState);
+        setCurrentBPM(newBPM);
+    };
 
 
     return (
         <div style={{ height: '100vh', width: '100vw', position: 'relative' }}>
             <div ref={mapRef} style={{ height: '100%', width: '100%' }} />
 
+            {/* Zone Management Button */}
             <button
-                onClick={clearArrangement}
+                onClick={() => setShowZoneManagement(!showZoneManagement)}
                 style={{
                     position: 'absolute',
-                    top: '500px',
+                    top: '600px',
                     left: '10px',
-                    backgroundColor: '#ef4444',
+                    backgroundColor: '#8b5cf6',
                     color: 'white',
                     padding: '8px 12px',
                     border: 'none',
@@ -1006,19 +1132,120 @@ const DrawMapZones = ({
                     zIndex: 1000,
                     boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
                 }}
-                onMouseOver={(e) => (e.target as HTMLElement).style.backgroundColor = '#dc2626'}
-                onMouseOut={(e) => (e.target as HTMLElement).style.backgroundColor = '#ef4444'}
             >
-                Clear Arrangement
+                {showZoneManagement ? '📍 Hide Zones' : '📍 Zone Management'}
             </button>
 
+            {/* Zone Management Menu */}
+            {showZoneManagement && (
+                <>
+                    {/* Overlay to close on click outside */}
+                    <div
+                        onClick={handleCloseZoneManagement}
+                        style={{
+                            position: 'fixed',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            zIndex: 1000,
+                            backgroundColor: 'transparent'
+                        }}
+                    />
+                    {/* Zone management panel */}
+                    <div style={{
+                        position: 'absolute',
+                        top: '540px',
+                        left: '10px',
+                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                        padding: '12px',
+                        borderRadius: '8px',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                        zIndex: 1001,
+                        minWidth: '200px',
+                    }}>
+                        <div style={{
+                            fontSize: '12px',
+                            fontWeight: 'bold',
+                            marginBottom: '12px',
+                            color: '#374151',
+                        }}>
+                            Zone Management
+                        </div>
+
+                        {/* Export Button */}
+                        <button
+                            onClick={exportArrangement}
+                            style={{
+                                width: '100%',
+                                backgroundColor: '#3b82f6',
+                                color: 'white',
+                                padding: '8px 12px',
+                                border: 'none',
+                                borderRadius: '4px',
+                                fontSize: '14px',
+                                cursor: 'pointer',
+                                marginBottom: '8px',
+                                fontWeight: '500'
+                            }}
+                        >
+                            💾 Export Arrangement
+                        </button>
+
+                        {/* Import Button */}
+                        <label htmlFor="importArrangement" style={{
+                            display: 'block',
+                            width: '100%',
+                            backgroundColor: '#10b981',
+                            color: 'white',
+                            padding: '8px 12px',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '14px',
+                            cursor: 'pointer',
+                            marginBottom: '8px',
+                            textAlign: 'center',
+                            fontWeight: '500',
+                            boxSizing: 'border-box'
+                        }}>
+                            📂 Import Arrangement
+                            <input
+                                id="importArrangement"
+                                type="file"
+                                accept="application/json"
+                                style={{ display: 'none' }}
+                                onChange={importArrangement}
+                            />
+                        </label>
+
+                        {/* Clear Button */}
+                        <button
+                            onClick={clearArrangement}
+                            style={{
+                                width: '100%',
+                                backgroundColor: '#ef4444',
+                                color: 'white',
+                                padding: '8px 12px',
+                                border: 'none',
+                                borderRadius: '4px',
+                                fontSize: '14px',
+                                cursor: 'pointer',
+                                fontWeight: '500'
+                            }}
+                        >
+                            🗑️ Clear Arrangement
+                        </button>
+                    </div>
+                </>
+            )}
+
             <button
-                onClick={exportArrangement}
+                onClick={() => setDebugMode(!debugMode)}
                 style={{
                     position: 'absolute',
-                    top: '540px',
-                    left: '10px',
-                    backgroundColor: '#3b82f6',
+                    bottom: '10px',
+                    right: '10px',
+                    backgroundColor: debugMode ? '#6b7280' : '#8b5cf6',
                     color: 'white',
                     padding: '8px 12px',
                     border: 'none',
@@ -1029,91 +1256,172 @@ const DrawMapZones = ({
                     boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
                 }}
             >
-                Export Arrangement
+                {debugMode ? 'hide experimental' : 'experimental'}
             </button>
 
-            <label htmlFor="importArrangement" style={{
-                position: 'absolute',
-                top: '580px',
-                left: '10px',
-                backgroundColor: '#10b981',
-                color: 'white',
-                padding: '8px 12px',
-                border: 'none',
-                borderRadius: '4px',
-                fontSize: '14px',
-                cursor: 'pointer',
-                zIndex: 1000,
-                boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-            }}>
-                Import Arrangement
-                <input
-                    id="importArrangement"
-                    type="file"
-                    accept="application/json"
-                    style={{ display: 'none' }}
-                    onChange={importArrangement}
-                />
-            </label>
+            {debugMode && (
+                <>
+                    <button
+                        onClick={handleSoundboxing}
+                        style={{
+                            position: 'absolute',
+                            bottom: '100px',
+                            right: '10px',
+                            backgroundColor: '#3b82f6',
+                            color: 'white',
+                            padding: '8px 12px',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '14px',
+                            cursor: 'pointer',
+                            zIndex: 1000,
+                            boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                        }}
+                    >
+                        sound bank
+                    </button>
+                    <button
+                        onClick={() => nearestShapes({threshold: 100})}
+                        style={{
+                            position: 'absolute',
+                            bottom: '55px',
+                            right: '10px',
+                            backgroundColor: '#3b82f6',
+                            color: 'white',
+                            padding: '8px 12px',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '14px',
+                            cursor: 'pointer',
+                            zIndex: 1000,
+                            boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                        }}
+                    >
+                        get nearest (debug)
+                    </button>
+                    <button
+                        onClick={handleStopAudio}
+                        style={{
+                            position: 'absolute',
+                            bottom: '145px',
+                            right: '10px',
+                            backgroundColor: '#f63b3bff',
+                            color: 'white',
+                            padding: '8px 12px',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '14px',
+                            cursor: 'pointer',
+                            zIndex: 1000,
+                            boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                        }}
+                    >
+                        stop all audio
+                    </button>
+                </>
+            )}
+
+            {/* Debug Instrument Selector */}
+            {showDebugInstruments && (
+                <>
+                    {/* Overlay to close on click outside */}
+                    <div
+                        onClick={handleCloseDebugSelector}
+                        style={{
+                            position: 'fixed',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            zIndex: 1000,
+                            backgroundColor: 'transparent'
+                        }}
+                    />
+                    {/* Instrument list */}
+                    <div
+                        style={{
+                            position: 'absolute',
+                            bottom: '145px',
+                            right: '10px',
+                            backgroundColor: 'white',
+                            border: '1px solid #ccc',
+                            borderRadius: '4px',
+                            boxShadow: '0 4px 8px rgba(0,0,0,0.2)',
+                            zIndex: 1001,
+                            maxHeight: '300px',
+                            overflowY: 'auto',
+                            minWidth: '200px'
+                        }}
+                    >
+                        <div style={{ padding: '8px', borderBottom: '1px solid #e5e5e5', fontWeight: 'bold', color: '#111' }}>
+                            Select instruments
+                        </div>
+                        {INSTRUMENT_DEFINITIONS.map((instrument) => {
+                            const isPlaying = playingInstruments.has(instrument.id);
+                            return (
+                                <div
+                                    key={instrument.id}
+                                    style={{
+                                        padding: '8px 12px',
+                                        borderBottom: '1px solid #f0f0f0',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: '12px'
+                                    }}
+                                >
+                                    <div style={{ flex: 1 }}>
+                                        <div style={{ fontWeight: '500', color: '#111' }}>{instrument.name}</div>
+                                        <div style={{ fontSize: '12px', color: '#1f34b8ff' }}>ID: {instrument.id}</div>
+                                    </div>
+                                    <button
+                                        onClick={() => handleToggleTryInstrument(instrument.id)}
+                                        style={{
+                                            padding: '6px 12px',
+                                            border: 'none',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            backgroundColor: isPlaying ? '#ef4444' : '#10b981',
+                                            color: 'white',
+                                            transition: 'all 0.2s',
+                                            minWidth: '60px'
+                                        }}
+                                        onMouseEnter={(e) => {
+                                            e.currentTarget.style.backgroundColor = isPlaying ? '#dc2626' : '#059669';
+                                        }}
+                                        onMouseLeave={(e) => {
+                                            e.currentTarget.style.backgroundColor = isPlaying ? '#ef4444' : '#10b981';
+                                        }}
+                                    >
+                                        {isPlaying ? '⏹ Stop' : '▶ Play'}
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </>
+            )}
 
             <button
-                onClick={() => nearestShapes({chosenMarker: chosenMarkerRef.current, threshold: 30})}
-                style={{
-                    position: 'absolute',
-                    top: '625px',
-                    left: '10px',
-                    backgroundColor: '#3b82f6',
-                    color: 'white',
-                    padding: '8px 12px',
-                    border: 'none',
-                    borderRadius: '4px',
-                    fontSize: '14px',
-                    cursor: 'pointer',
-                    zIndex: 1000,
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-                }}
-            >
-                Get nearest (debug)
-            </button>
-            <button
-                onClick={handleSoundboxing}
-                style={{
-                    position: 'absolute',
-                    top: '670px',
-                    left: '10px',
-                    backgroundColor: '#3b82f6',
-                    color: 'white',
-                    padding: '8px 12px',
-                    border: 'none',
-                    borderRadius: '4px',
-                    fontSize: '14px',
-                    cursor: 'pointer',
-                    zIndex: 1000,
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-                }}
-            >
-                Sound test (debug)
-            </button>
-            <button
-                onClick={handleUpdateMarkerAudio}
-                disabled={isAudioEnabled}
+                onClick={isAudioEnabled ? () => setShowTransportControls(!showTransportControls) : handleUpdateMarkerAudio}
                 style={{
                     position: 'absolute',
                     top: '325px',
                     left: '10px',
-                    backgroundColor: isAudioEnabled ? '#6b7280' : '#10b981',
+                    backgroundColor: isAudioEnabled ? '#3b82f6' : '#10b981',
                     color: 'white',
                     padding: '8px 12px',
                     border: 'none',
                     borderRadius: '4px',
                     fontSize: '14px',
-                    cursor: isAudioEnabled ? 'not-allowed' : 'pointer',
+                    cursor: 'pointer',
                     zIndex: 1000,
                     boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-                    opacity: isAudioEnabled ? 0.6 : 1
                 }}
             >
-                {isAudioEnabled ? '🔊 Audio On' : 'Start Audio'}
+                {isAudioEnabled ? (showTransportControls ? '🎵 Hide Transport' : '🎵 Transport Controls') : 'Start Audio'}
             </button>
             <button
                 onClick={handleStopAudio}
@@ -1136,6 +1444,148 @@ const DrawMapZones = ({
             >
                 Stop Audio
             </button>
+
+            {/* Transport Controls */}
+            {isAudioEnabled && showTransportControls && (
+                <>
+                    {/* Overlay to close on click outside */}
+                    <div
+                        onClick={handleCloseTransportControls}
+                        style={{
+                            position: 'fixed',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            zIndex: 1000,
+                            backgroundColor: 'transparent'
+                        }}
+                    />
+                    {/* Transport controls panel */}
+                    <div style={{
+                        position: 'absolute',
+                        top: '400px',
+                        left: '10px',
+                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                        padding: '12px',
+                        borderRadius: '8px',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                        zIndex: 1001,
+                        minWidth: '200px',
+                    }}>
+                    <div style={{
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        marginBottom: '8px',
+                        color: '#374151',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px'
+                    }}>
+                        🎵 Transport Controls
+                        {transportState?.masterId === currentUserId && (
+                            <span style={{
+                                fontSize: '10px',
+                                backgroundColor: '#3b82f6',
+                                color: 'white',
+                                padding: '2px 6px',
+                                borderRadius: '3px',
+                                fontWeight: 'normal'
+                            }}>
+                                Master
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Play/Pause buttons */}
+                    <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+                        <button
+                            onClick={handleTransportStart}
+                            disabled={transportState?.isPlaying}
+                            style={{
+                                flex: 1,
+                                backgroundColor: transportState?.isPlaying ? '#6b7280' : '#10b981',
+                                color: 'white',
+                                padding: '8px 12px',
+                                border: 'none',
+                                borderRadius: '4px',
+                                fontSize: '14px',
+                                cursor: transportState?.isPlaying ? 'not-allowed' : 'pointer',
+                                opacity: transportState?.isPlaying ? 0.6 : 1,
+                                fontWeight: '600'
+                            }}
+                        >
+                            ▶ Play
+                        </button>
+                        <button
+                            onClick={handleTransportStop}
+                            disabled={!transportState?.isPlaying}
+                            style={{
+                                flex: 1,
+                                backgroundColor: !transportState?.isPlaying ? '#6b7280' : '#ef4444',
+                                color: 'white',
+                                padding: '8px 12px',
+                                border: 'none',
+                                borderRadius: '4px',
+                                fontSize: '14px',
+                                cursor: !transportState?.isPlaying ? 'not-allowed' : 'pointer',
+                                opacity: !transportState?.isPlaying ? 0.6 : 1,
+                                fontWeight: '600'
+                            }}
+                        >
+                            ⏸ Pause
+                        </button>
+                    </div>
+
+                    {/* BPM Control */}
+                    <div style={{ marginBottom: '4px' }}>
+                        <label style={{
+                            fontSize: '11px',
+                            color: '#6b7280',
+                            display: 'block',
+                            marginBottom: '4px',
+                            fontWeight: '500'
+                        }}>
+                            Tempo: {currentBPM} BPM
+                        </label>
+                        <input
+                            type="range"
+                            min="60"
+                            max="200"
+                            value={currentBPM}
+                            onChange={(e) => handleBPMChange(Number(e.target.value))}
+                            style={{
+                                width: '100%',
+                                cursor: 'pointer'
+                            }}
+                        />
+                        <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            fontSize: '9px',
+                            color: '#9ca3af',
+                            marginTop: '2px'
+                        }}>
+                            <span>60</span>
+                            <span>200</span>
+                        </div>
+                    </div>
+
+                    {/* Transport info */}
+                    {transportState && (
+                        <div style={{
+                            fontSize: '10px',
+                            color: '#9ca3af',
+                            marginTop: '8px',
+                            paddingTop: '8px',
+                            borderTop: '1px solid #e5e7eb'
+                        }}>
+                            Position: {transportState.position}
+                        </div>
+                    )}
+                </div>
+                </>
+            )}
 
             <SoundKit
                 show={soundDropdown.show}
